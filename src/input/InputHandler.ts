@@ -33,7 +33,7 @@ export class InputHandler {
 
     canvas.addEventListener('wheel', (e) => {
       this.handleScroll(e);
-    });
+    }, { passive: true });
 
     canvas.addEventListener('mousedown', (e) => {
       this.textarea.focus();

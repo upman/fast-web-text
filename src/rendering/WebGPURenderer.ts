@@ -15,14 +15,32 @@ interface Token {
   endColumn: number;
 }
 
+const FLOATS_PER_CELL = 6;
+const MAX_VISIBLE_GLYPHS = 10000; // Conservative estimate for visible characters
+
 export class WebGPURenderer {
   private device!: GPUDevice;
   private context!: GPUCanvasContext;
   private pipeline!: GPURenderPipeline;
+  private bindGroup!: GPUBindGroup;
   private canvas: HTMLCanvasElement;
-  private uniformBuffer!: GPUBuffer;
+
+  // Storage buffers
+  private cellStorageBuffer!: GPUBuffer;
+  private glyphInfoStorageBuffer!: GPUBuffer;
+
+  // Uniform buffers
+  private layoutInfoBuffer!: GPUBuffer;
+  private atlasDimsBuffer!: GPUBuffer;
+
+  // Shared vertex buffer (one quad for all glyphs)
+  private quadVertexBuffer!: GPUBuffer;
+
+  // Texture atlas
   private textureAtlas!: TextureAtlas;
+  private atlasTexture!: GPUTexture;
   private sampler!: GPUSampler;
+
   private lineHeight: number = 18;
   private charWidth: number = 10;
   private monospaceOpt: MonospaceOptimizer;
@@ -58,15 +76,64 @@ export class WebGPURenderer {
       alphaMode: 'premultiplied',
     });
 
+    // Create texture atlas and pre-populate with common characters
     this.textureAtlas = new TextureAtlas(this.device, 2048);
+    await this.prewarmAtlas();
+
+    // Create shared quad vertices (used by all glyph instances)
+    const quadVertices = new Float32Array([
+      0.0, 0.0,  // top-left
+      1.0, 0.0,  // top-right
+      0.0, 1.0,  // bottom-left
+      0.0, 1.0,  // bottom-left
+      1.0, 0.0,  // top-right
+      1.0, 1.0,  // bottom-right
+    ]);
+
+    this.quadVertexBuffer = this.device.createBuffer({
+      size: quadVertices.byteLength,
+      usage: GPUBufferUsage.VERTEX,
+      mappedAtCreation: true,
+    });
+    new Float32Array(this.quadVertexBuffer.getMappedRange()).set(quadVertices);
+    this.quadVertexBuffer.unmap();
+
+    // Create cell storage buffer (holds all visible glyphs)
+    this.cellStorageBuffer = this.device.createBuffer({
+      size: MAX_VISIBLE_GLYPHS * FLOATS_PER_CELL * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create glyph info storage buffer (glyph metadata from atlas)
+    const maxGlyphs = 10000; // Should be enough for most cases
+    const floatsPerGlyph = 6; // position(2) + size(2) + origin(2)
+    this.glyphInfoStorageBuffer = this.device.createBuffer({
+      size: maxGlyphs * floatsPerGlyph * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create uniform buffers
+    this.layoutInfoBuffer = this.device.createBuffer({
+      size: 6 * Float32Array.BYTES_PER_ELEMENT, // 6 floats
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    this.atlasDimsBuffer = this.device.createBuffer({
+      size: 2 * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create texture array for atlas pages
+    this.atlasTexture = this.textureAtlas.createTextureArray(this.device);
 
     this.sampler = this.device.createSampler({
-      magFilter: 'linear',
-      minFilter: 'linear',
+      magFilter: 'nearest',  // VS Code uses 'nearest' for crisp text
+      minFilter: 'nearest',
     });
 
     await this.createRenderPipeline();
-    this.createUniformBuffer();
+    this.createBindGroup();
+    await this.uploadAtlasData();
 
     this.monospaceOpt.detectMonospace('monospace', 14);
     if (this.monospaceOpt.getIsMonospace()) {
@@ -74,82 +141,44 @@ export class WebGPURenderer {
     }
   }
 
+  private async prewarmAtlas(): Promise<void> {
+    // Pre-cache common ASCII characters
+    const style: GlyphStyle = {
+      fontFamily: 'monospace',
+      fontSize: 14,
+      color: '#FFFFFF',
+      bold: false,
+      italic: false,
+    };
+
+    const chars = ' ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:\'",.<>?/\\`~';
+    for (const char of chars) {
+      this.textureAtlas.getGlyph(char, style);
+    }
+  }
+
   private async createRenderPipeline(): Promise<void> {
+    // Load shader from file
+    const shaderResponse = await fetch('/src/shaders/glyph.wgsl');
+    const shaderCode = await shaderResponse.text();
+
     const shaderModule = this.device.createShaderModule({
-      code: `
-        struct VertexInput {
-          @location(0) position: vec2<f32>,
-          @location(1) texCoord: vec2<f32>,
-        }
-
-        struct VertexOutput {
-          @builtin(position) position: vec4<f32>,
-          @location(0) texCoord: vec2<f32>,
-        }
-
-        struct Uniforms {
-          viewProjection: mat4x4<f32>,
-          color: vec4<f32>,
-        }
-
-        @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-        @group(0) @binding(1) var glyphTexture: texture_2d<f32>;
-        @group(0) @binding(2) var glyphSampler: sampler;
-
-        @vertex
-        fn vs_main(input: VertexInput) -> VertexOutput {
-          var output: VertexOutput;
-          output.position = uniforms.viewProjection * vec4<f32>(input.position, 0.0, 1.0);
-          output.texCoord = input.texCoord;
-          return output;
-        }
-
-        @fragment
-        fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-          let texColor = textureSample(glyphTexture, glyphSampler, input.texCoord);
-          return texColor * uniforms.color;
-        }
-      `
-    });
-
-    const pipelineLayout = this.device.createPipelineLayout({
-      bindGroupLayouts: [
-        this.device.createBindGroupLayout({
-          entries: [
-            {
-              binding: 0,
-              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-              buffer: { type: 'uniform' }
-            },
-            {
-              binding: 1,
-              visibility: GPUShaderStage.FRAGMENT,
-              texture: { sampleType: 'float' }
-            },
-            {
-              binding: 2,
-              visibility: GPUShaderStage.FRAGMENT,
-              sampler: {}
-            }
-          ]
-        })
-      ]
+      label: 'Glyph shader',
+      code: shaderCode
     });
 
     this.pipeline = this.device.createRenderPipeline({
-      layout: pipelineLayout,
+      label: 'Glyph render pipeline',
+      layout: 'auto',
       vertex: {
         module: shaderModule,
         entryPoint: 'vs_main',
-        buffers: [
-          {
-            arrayStride: 16,
-            attributes: [
-              { shaderLocation: 0, offset: 0, format: 'float32x2' },
-              { shaderLocation: 1, offset: 8, format: 'float32x2' },
-            ]
-          }
-        ]
+        buffers: [{
+          arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+          attributes: [
+            { shaderLocation: 0, offset: 0, format: 'float32x2' }, // quad position
+          ],
+        }],
       },
       fragment: {
         module: shaderModule,
@@ -160,56 +189,64 @@ export class WebGPURenderer {
             color: {
               srcFactor: 'src-alpha',
               dstFactor: 'one-minus-src-alpha',
-              operation: 'add',
             },
             alpha: {
               srcFactor: 'one',
               dstFactor: 'one-minus-src-alpha',
-              operation: 'add',
             },
           },
-        }]
+        }],
       },
       primitive: {
         topology: 'triangle-list',
-      }
+      },
     });
   }
 
-  private createUniformBuffer(): void {
-    this.uniformBuffer = this.device.createBuffer({
-      size: 80,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  private createBindGroup(): void {
+    this.bindGroup = this.device.createBindGroup({
+      label: 'Glyph bind group',
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.layoutInfoBuffer } },
+        { binding: 1, resource: { buffer: this.atlasDimsBuffer } },
+        { binding: 2, resource: { buffer: this.glyphInfoStorageBuffer } },
+        { binding: 3, resource: { buffer: this.cellStorageBuffer } },
+        { binding: 4, resource: this.atlasTexture.createView({ dimension: '2d-array' }) },
+        { binding: 5, resource: this.sampler },
+      ],
     });
   }
 
-  private createVertexBuffer(vertices: Float32Array): GPUBuffer {
-    const buffer = this.device.createBuffer({
-      size: vertices.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(buffer, 0, vertices);
-    return buffer;
+  private async uploadAtlasData(): Promise<void> {
+    // Upload atlas dimensions
+    const atlasDims = new Float32Array([2048, 2048]);
+    this.device.queue.writeBuffer(this.atlasDimsBuffer, 0, atlasDims);
+
+    // Upload glyph info from texture atlas
+    const glyphInfoData = this.textureAtlas.getGlyphInfoArray();
+    this.device.queue.writeBuffer(this.glyphInfoStorageBuffer, 0, glyphInfoData);
+
+    // Copy atlas pages to texture array
+    await this.textureAtlas.copyPagesToTextureArray(this.device, this.atlasTexture);
   }
 
   render(visibleLines: LineData[], scrollTop: number): void {
-    const commandEncoder = this.device.createCommandEncoder();
-    const textureView = this.context.getCurrentTexture().createView();
+    // Update layout uniforms
+    const layoutInfo = new Float32Array([
+      this.canvas.width,  // canvasDims.x
+      this.canvas.height, // canvasDims.y
+      0,                  // viewportOffset.x
+      0,                  // viewportOffset.y
+      this.canvas.width,  // viewportDims.x
+      this.canvas.height, // viewportDims.y
+    ]);
+    this.device.queue.writeBuffer(this.layoutInfoBuffer, 0, layoutInfo);
 
-    const renderPass = commandEncoder.beginRenderPass({
-      colorAttachments: [{
-        view: textureView,
-        clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
-        loadOp: 'clear',
-        storeOp: 'store',
-      }]
-    });
-
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-    const projection = this.createOrthographicProjection(width, height);
-
-    renderPass.setPipeline(this.pipeline);
+    // Build cell data for all visible glyphs
+    const cellData = new Float32Array(MAX_VISIBLE_GLYPHS * FLOATS_PER_CELL);
+    let cellIndex = 0;
+    let glyphCount = 0;
 
     const style: GlyphStyle = {
       fontFamily: 'monospace',
@@ -220,100 +257,77 @@ export class WebGPURenderer {
     };
 
     for (const lineData of visibleLines) {
-      const yOffset = (lineData.lineNumber * this.lineHeight) - scrollTop;
+      const y = (lineData.lineNumber * this.lineHeight) - scrollTop;
 
-      let cachedWidth = this.widthCache.getLineWidth(lineData.lineNumber);
-      if (cachedWidth === undefined) {
-        cachedWidth = this.monospaceOpt.getIsMonospace()
-          ? lineData.line.length * this.charWidth
-          : this.monospaceOpt.getCharPosition(lineData.line.length, lineData.line);
-        this.widthCache.setLineWidth(lineData.lineNumber, cachedWidth);
+      // Skip lines that are off-screen
+      if (y + this.lineHeight < 0 || y > this.canvas.height) {
+        continue;
       }
 
-      let xOffset = 0;
-
-      for (let i = 0; i < lineData.line.length; i++) {
+      for (let i = 0; i < lineData.line.length && glyphCount < MAX_VISIBLE_GLYPHS; i++) {
         const char = lineData.line[i];
+
+        // Skip whitespace for performance (or render as space)
+        if (char === ' ') {
+          continue;
+        }
+
         const glyph = this.textureAtlas.getGlyph(char, style);
+        const x = i * this.charWidth;
 
-        if (this.monospaceOpt.getIsMonospace()) {
-          xOffset = i * this.charWidth;
-        }
+        // Fill cell entry
+        cellData[cellIndex++] = x;              // positionX
+        cellData[cellIndex++] = y;              // positionY
+        cellData[cellIndex++] = 0;              // unused1
+        cellData[cellIndex++] = 0;              // unused2
+        cellData[cellIndex++] = glyph.index;    // glyphIndex
+        cellData[cellIndex++] = glyph.page;     // textureLayer
 
-        const snappedX = Math.round(xOffset);
-        const snappedY = Math.round(yOffset);
-
-        const vertices = this.createGlyphVertices(
-          snappedX,
-          snappedY,
-          glyph.width,
-          glyph.height,
-          glyph.x,
-          glyph.y,
-          2048
-        );
-
-        const vertexBuffer = this.createVertexBuffer(vertices);
-
-        const uniformData = new Float32Array([
-          ...projection,
-          1.0, 1.0, 1.0, 1.0
-        ]);
-        this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
-
-        const bindGroup = this.device.createBindGroup({
-          layout: this.pipeline.getBindGroupLayout(0),
-          entries: [
-            { binding: 0, resource: { buffer: this.uniformBuffer } },
-            { binding: 1, resource: this.textureAtlas.getTexture(glyph.page).createView() },
-            { binding: 2, resource: this.sampler }
-          ]
-        });
-
-        renderPass.setBindGroup(0, bindGroup);
-        renderPass.setVertexBuffer(0, vertexBuffer);
-        renderPass.draw(6, 1, 0, 0);
-
-        if (!this.monospaceOpt.getIsMonospace()) {
-          xOffset += glyph.width;
-        }
+        glyphCount++;
       }
     }
 
+    // Early exit if nothing to render
+    if (glyphCount === 0) {
+      return;
+    }
+
+    // Upload cell data to GPU (ONE write)
+    this.device.queue.writeBuffer(
+      this.cellStorageBuffer,
+      0,
+      cellData,
+      0,
+      glyphCount * FLOATS_PER_CELL
+    );
+
+    // Render with ONE draw call
+    const commandEncoder = this.device.createCommandEncoder({ label: 'Glyph render encoder' });
+    const textureView = this.context.getCurrentTexture().createView();
+
+    const renderPass = commandEncoder.beginRenderPass({
+      label: 'Glyph render pass',
+      colorAttachments: [{
+        view: textureView,
+        clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+    });
+
+    renderPass.setPipeline(this.pipeline);
+    renderPass.setBindGroup(0, this.bindGroup);
+    renderPass.setVertexBuffer(0, this.quadVertexBuffer);
+
+    // ONE instanced draw call for all glyphs
+    renderPass.draw(
+      6,           // vertices per instance (quad)
+      glyphCount,  // instance count (number of glyphs)
+      0,           // first vertex
+      0            // first instance
+    );
+
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
-  }
-
-  private createGlyphVertices(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    texX: number,
-    texY: number,
-    atlasSize: number
-  ): Float32Array {
-    const u0 = texX / atlasSize;
-    const v0 = texY / atlasSize;
-    const u1 = (texX + width) / atlasSize;
-    const v1 = (texY + height) / atlasSize;
-
-    return new Float32Array([
-      x, y, u0, v0,
-      x + width, y, u1, v0,
-      x, y + height, u0, v1,
-      x, y + height, u0, v1,
-      x + width, y, u1, v0,
-      x + width, y + height, u1, v1,
-    ]);
-  }
-
-  private createOrthographicProjection(width: number, height: number): number[] {
-    return [
-      2.0 / width, 0, 0, 0,
-      0, -2.0 / height, 0, 0,
-      0, 0, 1, 0,
-      -1, 1, 0, 1
-    ];
   }
 }

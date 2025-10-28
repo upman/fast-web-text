@@ -6,7 +6,7 @@ export class GlyphRasterizer {
 
   constructor() {
     this.canvas = new OffscreenCanvas(128, 128);
-    const ctx = this.canvas.getContext('2d');
+    const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       throw new Error('Failed to get 2D context');
     }
