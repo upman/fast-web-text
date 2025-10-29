@@ -33,6 +33,7 @@ export class Editor {
   private canvas: HTMLCanvasElement;
   private container: HTMLElement;
   private needsRender: boolean = false;
+  private language: string = 'javascript';
 
   constructor(container: HTMLElement, canvas: HTMLCanvasElement) {
     this.container = container;
@@ -74,6 +75,14 @@ export class Editor {
     this.startRenderLoop();
   }
 
+  setLanguage(language: string): void {
+    if (this.language !== language) {
+      this.language = language;
+      this.highlighter.clearCache();
+      this.needsRender = true;
+    }
+  }
+
   private startRenderLoop(): void {
     const render = () => {
       if (this.needsRender) {
@@ -83,10 +92,10 @@ export class Editor {
 
         const visibleLines = [];
         const lineContent: string[] = [];
-        
+
         for (let i = visibleRange.startLine; i <= visibleRange.endLine; i++) {
           const line = this.document.getLine(i);
-          const tokens = this.highlighter.getCachedTokens(i, line, 'javascript');
+          const tokens = this.highlighter.getCachedTokens(i, line, this.language);
           visibleLines.push({ line, tokens, lineNumber: i });
           lineContent[i] = line;
         }
