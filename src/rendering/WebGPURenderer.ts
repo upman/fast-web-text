@@ -1,6 +1,7 @@
 import { TextureAtlas, GlyphStyle } from './TextureAtlas';
 import { MonospaceOptimizer } from '../optimizations/MonospaceOptimizer';
 import { LineWidthCache } from '../optimizations/LineWidthCache';
+import { ColorMapper } from '../utils/ColorUtils';
 
 interface LineData {
   line: string;
@@ -45,11 +46,13 @@ export class WebGPURenderer {
   private charWidth: number = 10;
   private monospaceOpt: MonospaceOptimizer;
   private widthCache: LineWidthCache;
+  private colorMapper: ColorMapper;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.monospaceOpt = new MonospaceOptimizer();
     this.widthCache = new LineWidthCache();
+    this.colorMapper = new ColorMapper();
   }
 
   async initialize(): Promise<void> {
@@ -142,8 +145,8 @@ export class WebGPURenderer {
   }
 
   private async prewarmAtlas(): Promise<void> {
-    // Pre-cache common ASCII characters
-    const style: GlyphStyle = {
+    // Pre-cache common ASCII characters in multiple common colors
+    const baseStyle: GlyphStyle = {
       fontFamily: 'monospace',
       fontSize: 14,
       color: '#FFFFFF',
@@ -152,8 +155,17 @@ export class WebGPURenderer {
     };
 
     const chars = ' ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:\'",.<>?/\\`~';
-    for (const char of chars) {
-      this.textureAtlas.getGlyph(char, style);
+
+    // Common token types to prewarm
+    const commonTokenTypes = ['keyword', 'string', 'comment', 'function', 'number', 'operator', 'plain'];
+
+    for (const tokenType of commonTokenTypes) {
+      const color = this.colorMapper.getColor(tokenType);
+      const style: GlyphStyle = { ...baseStyle, color };
+
+      for (const char of chars) {
+        this.textureAtlas.getGlyph(char, style);
+      }
     }
   }
 
@@ -250,7 +262,7 @@ export class WebGPURenderer {
     let cellIndex = 0;
     let glyphCount = 0;
 
-    const style: GlyphStyle = {
+    const baseStyle: GlyphStyle = {
       fontFamily: 'monospace',
       fontSize: 14,
       color: '#FFFFFF',
@@ -266,26 +278,37 @@ export class WebGPURenderer {
         continue;
       }
 
-      for (let i = 0; i < lineData.line.length && glyphCount < MAX_VISIBLE_GLYPHS; i++) {
-        const char = lineData.line[i];
+      // Iterate over tokens to get color information
+      for (const token of lineData.tokens) {
+        if (glyphCount >= MAX_VISIBLE_GLYPHS) break;
 
-        // Skip whitespace for performance (or render as space)
-        if (char === ' ') {
-          continue;
+        // Get color for this token type
+        const color = this.colorMapper.getColor(token.type);
+        const style: GlyphStyle = { ...baseStyle, color };
+
+        // Render each character in the token
+        for (let i = 0; i < token.content.length && glyphCount < MAX_VISIBLE_GLYPHS; i++) {
+          const char = token.content[i];
+
+          // Skip whitespace for performance
+          if (char === ' ') {
+            continue;
+          }
+
+          const glyph = this.textureAtlas.getGlyph(char, style);
+          const charIndex = token.startColumn + i;
+          const x = charIndex * this.charWidth;
+
+          // Fill cell entry
+          cellData[cellIndex++] = x;              // positionX
+          cellData[cellIndex++] = y;              // positionY
+          cellData[cellIndex++] = 0;              // unused1
+          cellData[cellIndex++] = 0;              // unused2
+          cellData[cellIndex++] = glyph.index;    // glyphIndex
+          cellData[cellIndex++] = glyph.page;     // textureLayer
+
+          glyphCount++;
         }
-
-        const glyph = this.textureAtlas.getGlyph(char, style);
-        const x = i * this.charWidth;
-
-        // Fill cell entry
-        cellData[cellIndex++] = x;              // positionX
-        cellData[cellIndex++] = y;              // positionY
-        cellData[cellIndex++] = 0;              // unused1
-        cellData[cellIndex++] = 0;              // unused2
-        cellData[cellIndex++] = glyph.index;    // glyphIndex
-        cellData[cellIndex++] = glyph.page;     // textureLayer
-
-        glyphCount++;
       }
     }
 
