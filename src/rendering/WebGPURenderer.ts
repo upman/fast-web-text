@@ -233,13 +233,15 @@ export class WebGPURenderer {
 
   render(visibleLines: LineData[], scrollTop: number): void {
     // Update layout uniforms
+    // Use CSS pixel dimensions (clientWidth/clientHeight) instead of buffer dimensions (width/height)
+    // This keeps text positioning in CSS pixels, matching the DOM cursor
     const layoutInfo = new Float32Array([
-      this.canvas.width,  // canvasDims.x
-      this.canvas.height, // canvasDims.y
-      0,                  // viewportOffset.x
-      0,                  // viewportOffset.y
-      this.canvas.width,  // viewportDims.x
-      this.canvas.height, // viewportDims.y
+      this.canvas.clientWidth,  // canvasDims.x (CSS pixels)
+      this.canvas.clientHeight, // canvasDims.y (CSS pixels)
+      0,                        // viewportOffset.x
+      0,                        // viewportOffset.y
+      this.canvas.clientWidth,  // viewportDims.x
+      this.canvas.clientHeight, // viewportDims.y
     ]);
     this.device.queue.writeBuffer(this.layoutInfoBuffer, 0, layoutInfo);
 
@@ -329,5 +331,19 @@ export class WebGPURenderer {
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
+  }
+
+  /**
+   * Get the line height used for rendering
+   */
+  getLineHeight(): number {
+    return this.lineHeight;
+  }
+
+  /**
+   * Get the character width used for rendering
+   */
+  getCharWidth(): number {
+    return this.charWidth;
   }
 }

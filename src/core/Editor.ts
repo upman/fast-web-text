@@ -1,6 +1,7 @@
 import { Document } from './Document';
 import { ViewportManager } from './ViewportManager';
 import { WebGPURenderer } from '../rendering/WebGPURenderer';
+import { CursorRenderer } from '../rendering/CursorRenderer';
 import { SyntaxHighlighter } from '../syntax/SyntaxHighlighter';
 import { ScreenReaderSupport } from '../accessibility/ScreenReaderSupport';
 import { AriaManager } from '../accessibility/AriaManager';
@@ -13,6 +14,7 @@ import { LayerHinting } from '../optimizations/LayerHinting';
 export class Editor {
   private document: Document;
   private renderer: WebGPURenderer;
+  private cursorRenderer: CursorRenderer;
   private viewport: ViewportManager;
   private highlighter: SyntaxHighlighter;
   private screenReader: ScreenReaderSupport;
@@ -35,6 +37,7 @@ export class Editor {
     this.canvas = canvas;
     this.document = new Document('');
     this.renderer = new WebGPURenderer(canvas);
+    this.cursorRenderer = new CursorRenderer(container, 18, 10);
     this.viewport = new ViewportManager(canvas.height);
     this.highlighter = new SyntaxHighlighter();
     this.screenReader = new ScreenReaderSupport(container);
@@ -51,6 +54,12 @@ export class Editor {
     this.document = new Document(content);
 
     await this.renderer.initialize();
+
+    // Update cursor dimensions to match renderer
+    this.cursorRenderer.updateDimensions(
+      this.renderer.getLineHeight(),
+      this.renderer.getCharWidth()
+    );
 
     this.layerHinting.applyHint(this.canvas);
 
@@ -72,6 +81,9 @@ export class Editor {
         }
 
         this.renderer.render(visibleLines, this.scrollTop);
+
+        // Render cursor
+        this.cursorRenderer.render(this.cursorLine, this.cursorColumn, this.scrollTop);
 
         this.screenReader.updateContent(this.document, this.cursorLine);
 
@@ -156,6 +168,18 @@ export class Editor {
     this.requestRender();
   }
 
+  setCursorPosition(line: number, column: number): void {
+    // Clamp line to valid range
+    this.cursorLine = Math.max(0, Math.min(this.document.getLineCount() - 1, line));
+    
+    // Clamp column to valid range for the line
+    const currentLine = this.document.getLine(this.cursorLine);
+    this.cursorColumn = Math.max(0, Math.min(currentLine.length, column));
+    
+    this.selectionManager.clearSelection();
+    this.requestRender();
+  }
+
   scroll(deltaY: number): void {
     const maxScroll = this.viewport.getTotalHeight(this.document.getLineCount()) - this.canvas.height;
     this.scrollTop = Math.max(0, Math.min(maxScroll, this.scrollTop + deltaY));
@@ -164,5 +188,17 @@ export class Editor {
 
   getCanvas(): HTMLCanvasElement {
     return this.canvas;
+  }
+
+  getScrollTop(): number {
+    return this.scrollTop;
+  }
+
+  getLineHeight(): number {
+    return this.renderer.getLineHeight();
+  }
+
+  getCharWidth(): number {
+    return this.renderer.getCharWidth();
   }
 }

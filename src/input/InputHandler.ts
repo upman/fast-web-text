@@ -2,8 +2,12 @@ export interface Editor {
   insertText(text: string): void;
   deleteText(count: number): void;
   moveCursor(deltaLine: number, deltaCol: number): void;
+  setCursorPosition(line: number, column: number): void;
   scroll(deltaY: number): void;
   getCanvas(): HTMLCanvasElement;
+  getScrollTop(): number;
+  getLineHeight(): number;
+  getCharWidth(): number;
 }
 
 export class InputHandler {
@@ -103,6 +107,27 @@ export class InputHandler {
 
   private handleClick(e: MouseEvent): void {
     this.textarea.focus();
+
+    // Calculate cursor position from click coordinates
+    const canvas = this.editor.getCanvas();
+    const rect = canvas.getBoundingClientRect();
+
+    // Get click position relative to canvas (in CSS pixels)
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Account for scroll position
+    const scrollTop = this.editor.getScrollTop();
+
+    // Calculate line and column
+    const lineHeight = this.editor.getLineHeight();
+    const charWidth = this.editor.getCharWidth();
+
+    const line = Math.floor((y + scrollTop) / lineHeight);
+    const column = Math.floor(x / charWidth);
+
+    // Set cursor position
+    this.editor.setCursorPosition(line, column);
   }
 
   private handleScroll(e: WheelEvent): void {

@@ -27,6 +27,23 @@
       height: 100%;
       display: block;
     }
+
+    /* Cursor styles */
+    .cursor {
+      position: absolute;
+      pointer-events: none;
+      background-color: #ffffff;
+      animation: cursor-blink 1s step-end infinite;
+    }
+
+    @keyframes cursor-blink {
+      0%, 50% {
+        opacity: 1;
+      }
+      50.01%, 100% {
+        opacity: 0;
+      }
+    }
   </style>
 </head>
 <body>
