@@ -2,6 +2,7 @@ import { Document } from './Document';
 import { ViewportManager } from './ViewportManager';
 import { WebGPURenderer } from '../rendering/WebGPURenderer';
 import { CursorRenderer } from '../rendering/CursorRenderer';
+import { SelectionRenderer } from '../rendering/SelectionRenderer';
 import { SyntaxHighlighter } from '../syntax/SyntaxHighlighter';
 import { ScreenReaderSupport } from '../accessibility/ScreenReaderSupport';
 import { AriaManager } from '../accessibility/AriaManager';
@@ -15,6 +16,7 @@ export class Editor {
   private document: Document;
   private renderer: WebGPURenderer;
   private cursorRenderer: CursorRenderer;
+  private selectionRenderer: SelectionRenderer;
   private viewport: ViewportManager;
   private highlighter: SyntaxHighlighter;
   private screenReader: ScreenReaderSupport;
@@ -38,6 +40,7 @@ export class Editor {
     this.document = new Document('');
     this.renderer = new WebGPURenderer(canvas);
     this.cursorRenderer = new CursorRenderer(container, 18, 10);
+    this.selectionRenderer = new SelectionRenderer(container, 18, 10);
     this.viewport = new ViewportManager(canvas.height);
     this.highlighter = new SyntaxHighlighter();
     this.screenReader = new ScreenReaderSupport(container);
@@ -55,8 +58,13 @@ export class Editor {
 
     await this.renderer.initialize();
 
-    // Update cursor dimensions to match renderer
+    // Update cursor and selection dimensions to match renderer
     this.cursorRenderer.updateDimensions(
+      this.renderer.getLineHeight(),
+      this.renderer.getCharWidth()
+    );
+
+    this.selectionRenderer.updateDimensions(
       this.renderer.getLineHeight(),
       this.renderer.getCharWidth()
     );
@@ -74,13 +82,19 @@ export class Editor {
         const visibleRange = this.viewport.getVisibleLineRange(this.scrollTop, this.document.getLineCount());
 
         const visibleLines = [];
+        const lineContent: string[] = [];
+        
         for (let i = visibleRange.startLine; i <= visibleRange.endLine; i++) {
           const line = this.document.getLine(i);
           const tokens = this.highlighter.getCachedTokens(i, line, 'javascript');
           visibleLines.push({ line, tokens, lineNumber: i });
+          lineContent[i] = line;
         }
 
         this.renderer.render(visibleLines, this.scrollTop);
+
+        // Render selection (must be before cursor)
+        this.selectionRenderer.render(this.selectionManager, this.scrollTop, lineContent);
 
         // Render cursor
         this.cursorRenderer.render(this.cursorLine, this.cursorColumn, this.scrollTop);
@@ -168,15 +182,64 @@ export class Editor {
     this.requestRender();
   }
 
+  moveCursorWithSelection(deltaLine: number, deltaCol: number): void {
+    // Start selection if not already active
+    if (!this.selectionManager.hasSelection()) {
+      this.selectionManager.startSelection({
+        line: this.cursorLine,
+        column: this.cursorColumn,
+      });
+    }
+
+    // Move cursor
+    this.cursorLine = Math.max(0, Math.min(this.document.getLineCount() - 1, this.cursorLine + deltaLine));
+
+    const currentLine = this.document.getLine(this.cursorLine);
+
+    if (deltaCol === Infinity) {
+      this.cursorColumn = currentLine.length;
+    } else if (deltaCol === -Infinity) {
+      this.cursorColumn = 0;
+    } else {
+      this.cursorColumn = Math.max(0, Math.min(currentLine.length, this.cursorColumn + deltaCol));
+    }
+
+    // Update selection to new cursor position
+    this.selectionManager.updateSelection({
+      line: this.cursorLine,
+      column: this.cursorColumn,
+    });
+
+    this.requestRender();
+  }
+
+  getCursorPosition(): { line: number; column: number } {
+    return {
+      line: this.cursorLine,
+      column: this.cursorColumn,
+    };
+  }
+
   setCursorPosition(line: number, column: number): void {
     // Clamp line to valid range
     this.cursorLine = Math.max(0, Math.min(this.document.getLineCount() - 1, line));
-    
+
     // Clamp column to valid range for the line
     const currentLine = this.document.getLine(this.cursorLine);
     this.cursorColumn = Math.max(0, Math.min(currentLine.length, column));
-    
+
     this.selectionManager.clearSelection();
+    this.requestRender();
+  }
+
+  setCursorPositionWithoutClearingSelection(line: number, column: number): void {
+    // Clamp line to valid range
+    this.cursorLine = Math.max(0, Math.min(this.document.getLineCount() - 1, line));
+
+    // Clamp column to valid range for the line
+    const currentLine = this.document.getLine(this.cursorLine);
+    this.cursorColumn = Math.max(0, Math.min(currentLine.length, column));
+
     this.requestRender();
   }
 
@@ -200,5 +263,40 @@ export class Editor {
 
   getCharWidth(): number {
     return this.renderer.getCharWidth();
+  }
+
+  startSelection(line: number, column: number): void {
+    // Clamp to valid position
+    const clampedLine = Math.max(0, Math.min(this.document.getLineCount() - 1, line));
+    const currentLine = this.document.getLine(clampedLine);
+    const clampedColumn = Math.max(0, Math.min(currentLine.length, column));
+
+    this.selectionManager.startSelection({
+      line: clampedLine,
+      column: clampedColumn,
+    });
+    this.requestRender();
+  }
+
+  updateSelection(line: number, column: number): void {
+    // Clamp to valid position
+    const clampedLine = Math.max(0, Math.min(this.document.getLineCount() - 1, line));
+    const currentLine = this.document.getLine(clampedLine);
+    const clampedColumn = Math.max(0, Math.min(currentLine.length, column));
+
+    this.selectionManager.updateSelection({
+      line: clampedLine,
+      column: clampedColumn,
+    });
+    this.requestRender();
+  }
+
+  clearSelection(): void {
+    this.selectionManager.clearSelection();
+    this.requestRender();
+  }
+
+  getSelectionManager(): SelectionManager {
+    return this.selectionManager;
   }
 }
