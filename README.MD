@@ -4,10 +4,10 @@ This is an experiment in text editor rendering to see how far the performance ca
 
 
 A raw text file rendered on chrome tops out at 60FPS while scrolling.
-![Video](raw-text-60fps.mp4)
+<video src="https://github.com/user-attachments/assets/a9f96722-b109-45d8-92c9-edcfe6681df9">
 
 We can push this to 100FPS when we create a shader and render directly on a canvas element
-![Video](public/canvas-100-fps.mp4)
+<video src="https://github.com/user-attachments/assets/41900e6d-48c2-4881-a45b-83200e159a74">
 
 To achieve the above,
 - Virtualized rendering of only the text that is in the window
